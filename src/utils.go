@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
 	"reflect"
 	"strings"
 )
@@ -18,4 +20,16 @@ func addLabelsFromStruct(recordType reflect.Type) []string {
 		labels = append(labels, label)
 	}
 	return labels
+}
+
+func RemoveMetricWithLabels(metric prometheus.Collector, labels prometheus.Labels) {
+	if gaugeVec, ok := metric.(*prometheus.GaugeVec); ok {
+		if gaugeVec.Delete(labels) {
+			logrus.Infof("Removed metric with labels: %+v", labels)
+		} else {
+			logrus.Warnf("Metric with labels: %+v not found", labels)
+		}
+	} else {
+		logrus.Error("Invalid metric type, expecting GaugeVec")
+	}
 }

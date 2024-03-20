@@ -106,22 +106,17 @@ func (tc *TwilioClient) FetchMessages() ([]openapi.ApiV2010Message, error) {
 	// Calculate time interval based on START_DATE and DURATION
 	now := time.Now()
 	endDate := now.Add(startDate)
-	dateSent := endDate.Add(-duration)
+	dateSentAfter := endDate.Add(-duration)
 
 	// Create parameters for the request
 	params := &openapi.ListMessageParams{
-		Limit:    &tc.config.RecordLimit,
-		DateSent: &dateSent,
+		Limit:          &tc.config.RecordLimit,
+		DateSentBefore: &endDate,
+		DateSentAfter:  &dateSentAfter,
 	}
 
 	// Get list of messages from Twilio
 	calls, err := tc.client.Api.ListMessage(params)
-
-	logrus.WithFields(logrus.Fields{
-		"calls":  calls,
-		"params": params,
-		"err":    err,
-	}).Debug("List message")
 
 	if err != nil {
 		return nil, err

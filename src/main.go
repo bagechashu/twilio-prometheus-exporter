@@ -18,6 +18,7 @@ type Config struct {
 	RecordLimit      int
 	StartDate        string
 	Duration         string
+	SkipMissing      bool
 }
 
 func initConfig() Config {
@@ -38,6 +39,10 @@ func initConfig() Config {
 	if duration == "" {
 		duration = "5m"
 	}
+	skipMissing, err := strconv.ParseBool(os.Getenv("SKIP_MISSING"))
+	if err != nil {
+		skipMissing = false
+	}
 	return Config{
 		TwilioAccountSID: os.Getenv("TWILIO_ACCOUNT_SID"),
 		TwilioAuthToken:  os.Getenv("TWILIO_AUTH_TOKEN"),
@@ -45,6 +50,7 @@ func initConfig() Config {
 		RecordLimit:      recordLimit,
 		StartDate:        startDate,
 		Duration:         duration,
+		SkipMissing:      skipMissing,
 	}
 }
 

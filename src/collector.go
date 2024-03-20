@@ -15,6 +15,7 @@ type TwilioCollector struct {
 	usageMetric   *prometheus.GaugeVec
 	callMetric    *prometheus.GaugeVec
 	messageMetric *prometheus.GaugeVec
+	config        Config
 }
 
 func NewTwilioCollector(config Config) *TwilioCollector {
@@ -23,6 +24,7 @@ func NewTwilioCollector(config Config) *TwilioCollector {
 	// Create Twilio collector
 	tc := &TwilioCollector{
 		client: client,
+		config: config,
 		balanceMetric: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "twilio_account_balance",
 			Help: "Current balance of Twilio account.",
@@ -45,10 +47,7 @@ func NewTwilioCollector(config Config) *TwilioCollector {
 }
 
 func (tc *TwilioCollector) Describe(ch chan<- *prometheus.Desc) {
-	tc.balanceMetric.Describe(ch)
-	tc.usageMetric.Describe(ch)
-	tc.callMetric.Describe(ch)
-	tc.messageMetric.Describe(ch)
+	// We don't need to describe individual gauges, as they are self-describing.
 }
 
 func (tc *TwilioCollector) Collect(ch chan<- prometheus.Metric) {
@@ -58,7 +57,7 @@ func (tc *TwilioCollector) Collect(ch chan<- prometheus.Metric) {
 		logrus.WithError(err).Error("Failed to fetch balance")
 		return
 	}
-	tc.UpdateMetric(tc.balanceMetric, balance, logrus.Fields{})
+	tc.UpdateMetric(tc.balanceMetric, balance, "Balance")
 
 	// Fetch and update metrics
 	usageRecordsToday, err := tc.client.FetchUsageRecordsToday()
@@ -66,7 +65,7 @@ func (tc *TwilioCollector) Collect(ch chan<- prometheus.Metric) {
 		logrus.WithError(err).Error("Failed to fetch usage records")
 		return
 	}
-	tc.UpdateMetric(tc.usageMetric, usageRecordsToday, logrus.Fields{})
+	tc.UpdateMetric(tc.usageMetric, usageRecordsToday, "Usage")
 
 	// Fetch and update call metrics
 	callRecords, err := tc.client.FetchCalls()
@@ -74,7 +73,7 @@ func (tc *TwilioCollector) Collect(ch chan<- prometheus.Metric) {
 		logrus.WithError(err).Error("Failed to fetch call records")
 		return
 	}
-	tc.UpdateMetric(tc.callMetric, callRecords, logrus.Fields{})
+	tc.UpdateMetric(tc.callMetric, callRecords, "")
 
 	// Fetch and update message metrics
 	messageRecords, err := tc.client.FetchMessages()
@@ -82,7 +81,7 @@ func (tc *TwilioCollector) Collect(ch chan<- prometheus.Metric) {
 		logrus.WithError(err).Error("Failed to fetch message records")
 		return
 	}
-	tc.UpdateMetric(tc.messageMetric, messageRecords, logrus.Fields{})
+	tc.UpdateMetric(tc.messageMetric, messageRecords, "")
 
 	// Export metrics to channel
 	tc.balanceMetric.Collect(ch)
@@ -91,17 +90,13 @@ func (tc *TwilioCollector) Collect(ch chan<- prometheus.Metric) {
 	tc.messageMetric.Collect(ch)
 }
 
-func (tc *TwilioCollector) UpdateMetric(metric prometheus.Collector, records interface{}, logFields map[string]interface{}) {
+func (tc *TwilioCollector) UpdateMetric(metric prometheus.Collector, records interface{}, metricField string) {
 	logrus.WithFields(logrus.Fields{
-		"metric":    metric,
-		"records":   records,
-		"logFields": logFields,
+		"metric":  metric,
+		"records": records,
 	}).Debug("Processed UpdateMetric")
-
+	metric.(*prometheus.GaugeVec).Reset()
 	v := reflect.ValueOf(records)
-	logrus.WithFields(logrus.Fields{
-		"v": v,
-	}).Debug("Processed v")
 
 	if v.Kind() != reflect.Slice {
 		logrus.Error("Invalid records type, expecting a slice")
@@ -118,7 +113,8 @@ func (tc *TwilioCollector) UpdateMetric(metric prometheus.Collector, records int
 			continue
 		}
 
-		var labelValues []string // Initialize empty labelValues slice
+		var labelValues []string    // Initialize empty labelValues slice
+		var metricValue float64 = 1 // Initialize empty metric value
 
 		logrus.WithFields(logrus.Fields{
 			"record": record,
@@ -154,22 +150,28 @@ func (tc *TwilioCollector) UpdateMetric(metric prometheus.Collector, records int
 					fieldValue = ""
 				}
 			}
-
-			logFields[fieldName] = fieldValue
 			logrus.WithFields(logrus.Fields{
-				"fieldValue": fieldValue,
-			}).Debug("Processed field value conversion")
-
+				"fieldName": fieldName,
+			}).Debug("Processed field name")
 			labelValues = append(labelValues, fieldValue)
-			logrus.WithFields(logrus.Fields{
-				"labelValues": labelValues,
-			}).Debug("Processed label values")
+
+			// Check if the current field is the metricField
+			if field.Name == metricField {
+				metricValue, _ = strconv.ParseFloat(fieldValue, 64)
+			}
 		}
 
-		logrus.WithFields(logFields).Info("Twilio metrics")
+		logrus.WithFields(logrus.Fields{
+			"labelValues": labelValues,
+			"metricValue": metricValue,
+		}).Debug("Twilio metrics")
+		// If skipMissing is true and metricValue is 0, skip the metric
+		if tc.config.SkipMissing && metricValue == 0 {
+			continue
+		}
 
 		if gaugeVec, ok := metric.(*prometheus.GaugeVec); ok {
-			gaugeVec.WithLabelValues(labelValues...).Set(1)
+			gaugeVec.WithLabelValues(labelValues...).Set(metricValue)
 		} else {
 			logrus.Error("Invalid metric type, expecting GaugeVec")
 			return
