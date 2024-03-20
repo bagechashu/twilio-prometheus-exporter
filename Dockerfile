@@ -5,17 +5,19 @@ FROM golang:1.22-alpine AS builder
 WORKDIR /app
 
 # Copy go mod and sum files
-COPY go.mod go.sum ./
+COPY ./src/go.mod ./src/go.sum ./
 
 # Download all dependencies
 RUN go mod download
 
 # Copy the source code into the container
-COPY . .
+COPY ./src/ .
 
-RUN go mod tidy
+ENV GOCACHE=/root/.cache/go-build
+
+# RUN go mod tidy
 # Build the Go app
-RUN CGO_ENABLED=0 GOOS=linux go build -o twilio_prometheus_exporter
+RUN --mount=type=cache,target="/root/.cache/go-build" CGO_ENABLED=0 GOOS=linux  go build -o twilio_prometheus_exporter
 
 # Start a new stage from scratch
 FROM alpine:latest
