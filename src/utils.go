@@ -1,10 +1,11 @@
 package main
 
 import (
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/sirupsen/logrus"
 	"reflect"
 	"strings"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sirupsen/logrus"
 )
 
 // fieldNameToLabel converts a field name to a label format by replacing spaces with underscores and converting to lowercase.

@@ -1,9 +1,14 @@
 version: '3'
 services:
   twilio-prometheus-exporter:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    container_name: twilio-prometheus-exporter
+    image: xianleeti/twilio_prometheus_exporter:v0.0.1
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     env_file:
       - .env
     ports:

@@ -28,8 +28,11 @@ To scrape metrics from this exporter, add the following job configuration to you
 ```yaml
 scrape_configs:
 - job_name: 'twilio_metrics'
-static_configs:
-- targets: ['localhost:8080']
+  scrape_interval: 5m
+  scrape_align_interval: 5m
+  static_configs:
+  - targets: ['localhost:8080']
+  metrics_path: /metrics
 ```
 Make sure Prometheus can reach the exporter at the specified target address.
 
