@@ -68,32 +68,20 @@ func main() {
 	}
 	logrus.SetLevel(logLevel)
 
+	// Create a custom registry without default collectors
+	registry := prometheus.NewRegistry()
+
 	// Create a new Twilio collector using the configuration
 	twilioCollector := NewTwilioCollector(config)
 
-	// Register Twilio collector in Prometheus metric registry
-	prometheus.MustRegister(twilioCollector)
+	// Register only our Twilio collector in the custom registry
+	registry.MustRegister(twilioCollector)
 
-	// Create a new HTTP server mux, to avoid using the default one
-	// default mux have expose /debug/vars, which may leak sensitive information
+	// Create a new HTTP server mux
 	mux := http.NewServeMux()
 
-	// Start HTTP server for metrics
-	// mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-	// 	w.Write([]byte(`<html>
-	//          <head><title>Twilio statistics exporter</title></head>
-	//          <body>
-	//          <h1>Twilio statistics exporter</h1>
-	//          <p><a href='metrics'>Metrics</a></p>
-	//          </body>
-	//          </html>`))
-	// })
-
-	mux.Handle("/metrics", promhttp.Handler())
-	// 显式禁用调试端点, 使用自定义 mux, 就不用担心默认 mux 会暴露 /debug/vars 端点
-	// mux.HandleFunc("/debug/vars", func(w http.ResponseWriter, r *http.Request) {
-	// 	http.NotFound(w, r)
-	// })
+	// Start HTTP server for metrics using our custom registry
+	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 
 	logrus.Fatal(http.ListenAndServe(":8080", mux))
 }
