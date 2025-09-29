@@ -74,16 +74,26 @@ func main() {
 	// Register Twilio collector in Prometheus metric registry
 	prometheus.MustRegister(twilioCollector)
 
+	// Create a new HTTP server mux, to avoid using the default one
+	// default mux have expose /debug/vars, which may leak sensitive information
+	mux := http.NewServeMux()
+
 	// Start HTTP server for metrics
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`<html>
-             <head><title>Twilio statistics exporter</title></head>
-             <body>
-             <h1>Twilio statistics exporter</h1>
-             <p><a href='metrics'>Metrics</a></p>
-             </body>
-             </html>`))
-	})
-	http.Handle("/metrics", promhttp.Handler())
-	logrus.Fatal(http.ListenAndServe(":8080", nil))
+	// mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	// 	w.Write([]byte(`<html>
+	//          <head><title>Twilio statistics exporter</title></head>
+	//          <body>
+	//          <h1>Twilio statistics exporter</h1>
+	//          <p><a href='metrics'>Metrics</a></p>
+	//          </body>
+	//          </html>`))
+	// })
+
+	mux.Handle("/metrics", promhttp.Handler())
+	// 显式禁用调试端点, 使用自定义 mux, 就不用担心默认 mux 会暴露 /debug/vars 端点
+	// mux.HandleFunc("/debug/vars", func(w http.ResponseWriter, r *http.Request) {
+	// 	http.NotFound(w, r)
+	// })
+
+	logrus.Fatal(http.ListenAndServe(":8080", mux))
 }
