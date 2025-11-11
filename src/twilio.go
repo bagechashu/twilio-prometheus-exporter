@@ -4,8 +4,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/twilio/twilio-go"
 
-	"time"
-
 	openapi "github.com/twilio/twilio-go/rest/api/v2010"
 )
 
@@ -70,105 +68,8 @@ func (tc *TwilioClient) FetchUsageRecordsToday() ([]ApiV2010UsageRecordToday, er
 	return localUsageRecords, nil
 }
 
-// FetchCall extracts call information from Twilio
-func (tc *TwilioClient) FetchCalls() ([]ApiV2010Call, error) {
-	// Convert string to time duration
-	offset, err := time.ParseDuration(tc.config.StartDate)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get current time
-	currentTime := time.Now().UTC()
-
-	// Calculate start time as current time minus offset
-	startTime := currentTime.Add(offset)
-
-	// Convert DURATION to time duration
-	duration, err := time.ParseDuration(tc.config.Duration)
-	if err != nil {
-		return nil, err
-	}
-
-	// Calculate endTime as the sum of START_DATE and DURATION
-	endTime := startTime.Add(duration)
-
-	// Create parameters for the request
-	params := &openapi.ListCallParams{
-		Limit:     &tc.config.RecordLimit,
-		StartTime: &startTime,
-		EndTime:   &endTime,
-	}
-
-	// Get list of calls from Twilio
-	calls, err := tc.client.Api.ListCall(params)
-	if err != nil {
-		return nil, err
-	}
-	logrus.Debugf("FetchCalls: %+v", calls)
-
-	// Convert from openapi.ApiV2010Call to ApiV2010Call
-	localCalls := make([]ApiV2010Call, len(calls))
-	for i, call := range calls {
-		localCalls[i] = ApiV2010Call{
-			AccountSid: call.AccountSid,
-			To:         call.To,
-			Status:     call.Status,
-			ApiVersion: call.ApiVersion,
-		}
-	}
-
-	return localCalls, nil
-}
-
-// FetchMessage extracts message information from Twilio
-func (tc *TwilioClient) FetchMessages() ([]ApiV2010Message, error) {
-	// Get start time and duration from configuration
-	startDate, err := time.ParseDuration(tc.config.StartDate)
-	if err != nil {
-		// Handle error parsing start time
-		logrus.Errorf("Error parsing start time: %v", err)
-		return nil, err
-	}
-
-	duration, err := time.ParseDuration(tc.config.Duration)
-	if err != nil {
-		// Handle error parsing duration
-		logrus.Errorf("Error parsing duration: %v", err)
-		return nil, err
-	}
-
-	// Calculate time interval based on START_DATE and DURATION
-	now := time.Now()
-	endDate := now.Add(startDate)
-	dateSentAfter := endDate.Add(-duration)
-
-	// Create parameters for the request
-	params := &openapi.ListMessageParams{
-		Limit:          &tc.config.RecordLimit,
-		DateSentBefore: &endDate,
-		DateSentAfter:  &dateSentAfter,
-	}
-
-	// Get list of messages from Twilio
-	messages, err := tc.client.Api.ListMessage(params)
-
-	if err != nil {
-		return nil, err
-	}
-	logrus.Debugf("FetchMessages: %+v", messages)
-
-	// Convert from openapi.ApiV2010Message to ApiV2010Message
-	localMessages := make([]ApiV2010Message, len(messages))
-	for i, message := range messages {
-		localMessages[i] = ApiV2010Message{
-			To:         message.To,
-			AccountSid: message.AccountSid,
-			Status:     message.Status,
-			ErrorCode:  message.ErrorCode,
-			ApiVersion: message.ApiVersion,
-		}
-	}
-
-	return localMessages, nil
-}
+// NOTE: Call and Message events are now handled via HTTP webhooks.
+// For real-time call and message monitoring, configure Twilio to send Status Callbacks to:
+// - Message Status Callbacks: POST /webhooks/message
+// - Call Status Events: POST /webhooks/call
+// This eliminates the high-cardinality risk of polling individual call/message records.

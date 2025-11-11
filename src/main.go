@@ -74,14 +74,36 @@ func main() {
 	// Create a new Twilio collector using the configuration
 	twilioCollector := NewTwilioCollector(config)
 
-	// Register only our Twilio collector in the custom registry
+	// Register Twilio collector in the custom registry
 	registry.MustRegister(twilioCollector)
+
+	// Create webhook metrics for real-time event tracking
+	webhookMetrics := NewWebhookMetrics()
+	if err := webhookMetrics.Register(registry); err != nil {
+		logrus.WithError(err).Fatal("Failed to register webhook metrics")
+	}
 
 	// Create a new HTTP server mux
 	mux := http.NewServeMux()
 
-	// Start HTTP server for metrics using our custom registry
+	// Metrics endpoint
 	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+
+	// Webhook endpoints for real-time event capture
+	mux.HandleFunc("/webhooks/message", webhookMetrics.HandleMessageStatusCallback)
+	mux.HandleFunc("/webhooks/call", webhookMetrics.HandleCallStatusCallback)
+
+	// Health check endpoint
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK\n"))
+	})
+
+	logrus.Info("Starting Twilio Prometheus exporter on :8080")
+	logrus.Info("  /metrics - Prometheus metrics endpoint")
+	logrus.Info("  /webhooks/message - Twilio message status callbacks")
+	logrus.Info("  /webhooks/call - Twilio call status callbacks")
+	logrus.Info("  /health - Health check endpoint")
 
 	logrus.Fatal(http.ListenAndServe(":8080", mux))
 }

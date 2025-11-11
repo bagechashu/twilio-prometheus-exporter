@@ -10,15 +10,14 @@ import (
 )
 
 // TwilioCollector provides a minimal, low-cardinality set of metrics from Twilio.
+// Polling is limited to Balance and Usage Records (stable, aggregated data).
+// Real-time call/message events are captured via webhooks.
 type TwilioCollector struct {
 	client *TwilioClient
 
 	// Gauges (reset each scrape) representing counts/amounts observed in the requested window
-	balanceGauge        *prometheus.GaugeVec // labels: currency
-	usageGauge          *prometheus.GaugeVec // labels: category, usage_unit
-	callsWindowGauge    *prometheus.GaugeVec // labels: status
-	messagesWindowGauge *prometheus.GaugeVec // labels: status
-	messagesFailedGauge *prometheus.GaugeVec // labels: error_code
+	balanceGauge *prometheus.GaugeVec // labels: currency
+	usageGauge   *prometheus.GaugeVec // labels: category, usage_unit
 
 	// Persistent counter for API errors
 	apiErrorCounter *prometheus.CounterVec // labels: operation
@@ -44,18 +43,6 @@ func NewTwilioCollector(config Config) *TwilioCollector {
 			Name: "twilio_usage_amount",
 			Help: "Amount used for usage records in the requested window.",
 		}, []string{"category", "usage_unit"}),
-		callsWindowGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "twilio_calls_window_count",
-			Help: "Number of calls observed in the requested window, grouped by status.",
-		}, []string{"status"}),
-		messagesWindowGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "twilio_messages_window_count",
-			Help: "Number of messages observed in the requested window, grouped by status.",
-		}, []string{"status"}),
-		messagesFailedGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "twilio_messages_window_failed_count",
-			Help: "Number of failed/undelivered messages in the requested window, grouped by error code.",
-		}, []string{"error_code"}),
 		apiErrorCounter: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "twilio_api_errors_total",
 			Help: "Total number of Twilio API errors by operation.",
@@ -136,61 +123,10 @@ func (tc *TwilioCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 
-	// Calls: count by status
-	calls, err := tc.client.FetchCalls()
-	if err != nil {
-		logrus.WithError(err).Error("FetchCalls failed")
-		tc.apiErrorCounter.WithLabelValues("FetchCalls").Inc()
-	} else {
-		tc.callsWindowGauge.Reset()
-		counts := make(map[string]int)
-		for _, c := range calls {
-			status := "unknown"
-			if c.Status != nil && *c.Status != "" {
-				status = *c.Status
-			}
-			counts[status]++
-		}
-		for status, cnt := range counts {
-			tc.callsWindowGauge.WithLabelValues(status).Set(float64(cnt))
-		}
-	}
-
-	// Messages: count by status, and failed by error code
-	messages, err := tc.client.FetchMessages()
-	if err != nil {
-		logrus.WithError(err).Error("FetchMessages failed")
-		tc.apiErrorCounter.WithLabelValues("FetchMessages").Inc()
-	} else {
-		tc.messagesWindowGauge.Reset()
-		tc.messagesFailedGauge.Reset()
-		statusCounts := make(map[string]int)
-		failedCounts := make(map[string]int)
-		for _, m := range messages {
-			status := "unknown"
-			if m.Status != nil && *m.Status != "" {
-				status = *m.Status
-			}
-			statusCounts[status]++
-
-			if m.ErrorCode != nil {
-				code := strconv.Itoa(*m.ErrorCode)
-				failedCounts[code]++
-			}
-		}
-		for s, cnt := range statusCounts {
-			tc.messagesWindowGauge.WithLabelValues(s).Set(float64(cnt))
-		}
-		for code, cnt := range failedCounts {
-			tc.messagesFailedGauge.WithLabelValues(code).Set(float64(cnt))
-		}
-	}
-
 	// Collect all metrics onto the channel
+	// NOTE: Call and message event metrics are now collected via webhook handlers
+	// (see webhooks.go for real-time event counters)
 	tc.balanceGauge.Collect(ch)
 	tc.usageGauge.Collect(ch)
-	tc.callsWindowGauge.Collect(ch)
-	tc.messagesWindowGauge.Collect(ch)
-	tc.messagesFailedGauge.Collect(ch)
 	tc.apiErrorCounter.Collect(ch)
 }
