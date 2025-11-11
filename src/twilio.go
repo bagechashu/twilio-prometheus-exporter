@@ -21,51 +21,31 @@ func NewTwilioClient(accountSID, authToken string, config Config) *TwilioClient 
 }
 
 // FetchBalance extracts the account balance from Twilio, along with currency and account SID
-func (tc *TwilioClient) FetchBalance() ([]ApiV2010Balance, error) {
-	balanceObj, err := tc.client.Api.FetchBalance(nil)
+func (tc *TwilioClient) FetchBalance() ([]openapi.ApiV2010Balance, error) {
+	balance, err := tc.client.Api.FetchBalance(nil)
 	if err != nil {
 		return nil, err
 	}
-	logrus.Debugf("FetchBalance: %+v", balanceObj)
+	logrus.Debugf("FetchBalance: %+v", balance)
 
-	// Convert from openapi.ApiV2010Balance to ApiV2010Balance
-	localBalance := ApiV2010Balance{
-		AccountSid: balanceObj.AccountSid,
-		Balance:    balanceObj.Balance,
-		Currency:   balanceObj.Currency,
-	}
-
-	return []ApiV2010Balance{localBalance}, nil
+	return []openapi.ApiV2010Balance{*balance}, nil
 }
 
 // FetchUsageRecords extracts usage records from Twilio
-func (tc *TwilioClient) FetchUsageRecordsToday() ([]ApiV2010UsageRecordToday, error) {
+func (tc *TwilioClient) FetchUsageRecordsToday() ([]openapi.ApiV2010UsageRecordToday, error) {
 	// Create parameters for the request including record limit and EndDate
 	params := &openapi.ListUsageRecordTodayParams{
 		Limit: &tc.config.RecordLimit,
 	}
 
 	// Get usage records from Twilio
-	usageRecords, err := tc.client.Api.ListUsageRecordToday(params)
+	usageRecordsToday, err := tc.client.Api.ListUsageRecordToday(params)
 	if err != nil {
 		return nil, err
 	}
-	logrus.Debugf("FetchUsageRecordsToday: %+v", usageRecords)
+	logrus.Debugf("FetchUsageRecordsToday: %+v", usageRecordsToday)
 
-	// Convert from openapi.ApiV2010UsageRecordToday to ApiV2010UsageRecordToday
-	localUsageRecords := make([]ApiV2010UsageRecordToday, len(usageRecords))
-	for i, record := range usageRecords {
-		localUsageRecords[i] = ApiV2010UsageRecordToday{
-			AccountSid: record.AccountSid,
-			ApiVersion: record.ApiVersion,
-			Category:   record.Category,
-			CountUnit:  record.CountUnit,
-			Usage:      record.Usage,
-			UsageUnit:  record.UsageUnit,
-		}
-	}
-
-	return localUsageRecords, nil
+	return usageRecordsToday, nil
 }
 
 // NOTE: Call and Message events are now handled via HTTP webhooks.
