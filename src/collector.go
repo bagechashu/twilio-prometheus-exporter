@@ -1,337 +1,196 @@
 package main
 
 import (
-	"reflect"
 	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
-	// openapi "github.com/twilio/twilio-go/rest/api/v2010"
 )
 
+// TwilioCollector provides a minimal, low-cardinality set of metrics from Twilio.
 type TwilioCollector struct {
-	client        *TwilioClient
-	balanceMetric *prometheus.GaugeVec
-	usageMetric   *prometheus.GaugeVec
-	callMetric    *prometheus.GaugeVec
-	messageMetric *prometheus.GaugeVec
-	config        Config
+	client *TwilioClient
+
+	// Gauges (reset each scrape) representing counts/amounts observed in the requested window
+	balanceGauge        *prometheus.GaugeVec // labels: currency
+	usageGauge          *prometheus.GaugeVec // labels: category, usage_unit
+	callsWindowGauge    *prometheus.GaugeVec // labels: status
+	messagesWindowGauge *prometheus.GaugeVec // labels: status
+	messagesFailedGauge *prometheus.GaugeVec // labels: error_code
+
+	// Persistent counter for API errors
+	apiErrorCounter *prometheus.CounterVec // labels: operation
+
+	config Config
+
+	// mutex to protect internal operations
+	mu sync.Mutex
 }
 
+// NewTwilioCollector builds a collector with a small, well-defined label set to avoid cardinality explosions.
 func NewTwilioCollector(config Config) *TwilioCollector {
 	client := NewTwilioClient(config.TwilioAccountSID, config.TwilioAuthToken, config)
-
-	// Create Twilio collector
-	// tc := &TwilioCollector{
-	// 	client: client,
-	// 	config: config,
-	// 	balanceMetric: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	// 		Name: "twilio_account_balance",
-	// 		Help: "Current balance of Twilio account.",
-	// 	}, addLabelsFromStruct(reflect.TypeOf(openapi.ApiV2010Balance{}))),
-	// 	usageMetric: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	// 		Name: "twilio_usage",
-	// 		Help: "The amount used to bill usage and measured in usage_units.",
-	// 	}, addLabelsFromStruct(reflect.TypeOf(openapi.ApiV2010UsageRecordToday{}))),
-	// 	callMetric: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	// 		Name: "twilio_calls",
-	// 		Help: "Number of calls made or received.",
-	// 	}, addLabelsFromStruct(reflect.TypeOf(openapi.ApiV2010Call{}))),
-	// 	messageMetric: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-	// 		Name: "twilio_messages",
-	// 		Help: "Number of messages sent or received.",
-	// 	}, addLabelsFromStruct(reflect.TypeOf(openapi.ApiV2010Message{}))),
-	// }
 
 	tc := &TwilioCollector{
 		client: client,
 		config: config,
-		balanceMetric: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		balanceGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "twilio_account_balance",
-			Help: "Current balance of Twilio account.",
-		}, addLabelsFromStruct(reflect.TypeOf(ApiV2010Balance{}))),
-		usageMetric: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "twilio_usage",
-			Help: "The amount used to bill usage and measured in usage_units.",
-		}, addLabelsFromStruct(reflect.TypeOf(ApiV2010UsageRecordToday{}))),
-		callMetric: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "twilio_calls",
-			Help: "Number of calls made or received.",
-		}, addLabelsFromStruct(reflect.TypeOf(ApiV2010Call{}))),
-		messageMetric: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "twilio_messages",
-			Help: "Number of messages sent or received.",
-		}, addLabelsFromStruct(reflect.TypeOf(ApiV2010Message{}))),
+			Help: "Current balance of Twilio account (numeric).",
+		}, []string{"currency"}),
+		usageGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "twilio_usage_amount",
+			Help: "Amount used for usage records in the requested window.",
+		}, []string{"category", "usage_unit"}),
+		callsWindowGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "twilio_calls_window_count",
+			Help: "Number of calls observed in the requested window, grouped by status.",
+		}, []string{"status"}),
+		messagesWindowGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "twilio_messages_window_count",
+			Help: "Number of messages observed in the requested window, grouped by status.",
+		}, []string{"status"}),
+		messagesFailedGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "twilio_messages_window_failed_count",
+			Help: "Number of failed/undelivered messages in the requested window, grouped by error code.",
+		}, []string{"error_code"}),
+		apiErrorCounter: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "twilio_api_errors_total",
+			Help: "Total number of Twilio API errors by operation.",
+		}, []string{"operation"}),
 	}
 
 	return tc
 }
 
 func (tc *TwilioCollector) Describe(ch chan<- *prometheus.Desc) {
-	// We don't need to describe individual gauges, as they are self-describing.
+	// Let the individual metric descriptors be handled by their collectors
 }
 
 func (tc *TwilioCollector) Collect(ch chan<- prometheus.Metric) {
-	// Fetch account balance
-	balance, err := tc.client.FetchBalance()
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+
+	// Balance
+	balanceObjs, err := tc.client.FetchBalance()
 	if err != nil {
-		logrus.WithError(err).Error("Failed to fetch balance")
-		return
-	}
-	tc.UpdateMetric(tc.balanceMetric, balance, "Balance")
-
-	// Fetch and update metrics
-	usageRecordsToday, err := tc.client.FetchUsageRecordsToday()
-	if err != nil {
-		logrus.WithError(err).Error("Failed to fetch usage records")
-		return
-	}
-	tc.UpdateMetric(tc.usageMetric, usageRecordsToday, "Usage")
-
-	// Fetch and update call metrics
-	callRecords, err := tc.client.FetchCalls()
-	if err != nil {
-		logrus.WithError(err).Error("Failed to fetch call records")
-		return
-	}
-	tc.UpdateMetric(tc.callMetric, callRecords, "")
-
-	// Fetch and update message metrics
-	messageRecords, err := tc.client.FetchMessages()
-	if err != nil {
-		logrus.WithError(err).Error("Failed to fetch message records")
-		return
-	}
-	tc.UpdateMetric(tc.messageMetric, messageRecords, "")
-
-	// Export metrics to channel
-	tc.balanceMetric.Collect(ch)
-	tc.usageMetric.Collect(ch)
-	tc.callMetric.Collect(ch)
-	tc.messageMetric.Collect(ch)
-}
-
-func (tc *TwilioCollector) UpdateMetric(metric prometheus.Collector, records interface{}, metricField string) {
-	logrus.WithFields(logrus.Fields{
-		"metric":  metric,
-		"records": records,
-	}).Debug("Processed UpdateMetric")
-	metric.(*prometheus.GaugeVec).Reset()
-	v := reflect.ValueOf(records)
-
-	if v.Kind() != reflect.Slice {
-		logrus.Error("Invalid records type, expecting a slice")
-		return
-	}
-
-	// Iterate over slice elements
-	for i := 0; i < v.Len(); i++ {
-		record := v.Index(i)
-
-		// Ensure record is a struct
-		if record.Kind() != reflect.Struct {
-			logrus.Error("Invalid record type, expecting a struct")
-			continue
-		}
-
-		var labelValues []string    // Initialize empty labelValues slice
-		var metricValue float64 = 1 // Initialize empty metric value
-
-		logrus.WithFields(logrus.Fields{
-			"record": record,
-		}).Debug("Processed record")
-
-		// Iterate over struct fields
-		for j := 0; j < record.NumField(); j++ {
-			field := record.Type().Field(j)
-			logrus.WithFields(logrus.Fields{
-				"field": field,
-			}).Debug("Processed field")
-
-			value := record.Field(j)
-			logrus.WithFields(logrus.Fields{
-				"field value": value,
-			}).Debug("Processed field value")
-
-			fieldName := fieldNameToLabel(field.Name)
-			logrus.WithFields(logrus.Fields{
-				"fieldName": fieldName,
-			}).Debug("Processed field name")
-
-			fieldValue := ""
-
-			// Convert pointers to strings and integers to values
-			if value.Kind() == reflect.Ptr && !value.IsNil() {
-				switch value.Elem().Kind() {
-				case reflect.String:
-					fieldValue = *value.Interface().(*string)
-				case reflect.Int:
-					fieldValue = strconv.Itoa(int(value.Elem().Int()))
-				default:
-					fieldValue = ""
+		logrus.WithError(err).Error("FetchBalance failed")
+		tc.apiErrorCounter.WithLabelValues("FetchBalance").Inc()
+	} else {
+		// reset and set latest
+		tc.balanceGauge.Reset()
+		for _, b := range balanceObjs {
+			var val float64 = 0
+			if b.Balance != nil {
+				if parsed, err := strconv.ParseFloat(*b.Balance, 64); err == nil {
+					val = parsed
 				}
 			}
-			logrus.WithFields(logrus.Fields{
-				"fieldName": fieldName,
-			}).Debug("Processed field name")
-			labelValues = append(labelValues, fieldValue)
-
-			// Check if the current field is the metricField
-			if field.Name == metricField {
-				metricValue, _ = strconv.ParseFloat(fieldValue, 64)
+			currency := ""
+			if b.Currency != nil {
+				currency = *b.Currency
 			}
-		}
-
-		logrus.WithFields(logrus.Fields{
-			"labelValues": labelValues,
-			"metricValue": metricValue,
-		}).Debug("Twilio metrics")
-		// If skipMissing is true and metricValue is 0, skip the metric
-		if tc.config.SkipMissing && metricValue == 0 {
-			continue
-		}
-
-		if gaugeVec, ok := metric.(*prometheus.GaugeVec); ok {
-			gaugeVec.WithLabelValues(labelValues...).Set(metricValue)
-		} else {
-			logrus.Error("Invalid metric type, expecting GaugeVec")
-			return
+			tc.balanceGauge.WithLabelValues(currency).Set(val)
 		}
 	}
-}
 
-type ApiV2010Balance struct {
-	// The unique SID identifier of the Account.
-	AccountSid *string `json:"account_sid,omitempty"`
-	// // The balance of the Account, in units specified by the unit parameter. Balance changes may not be reflected immediately. Child accounts do not contain balance information
-	// Balance *string `json:"balance,omitempty"`
-	// The units of currency for the account balance
-	Currency *string `json:"currency,omitempty"`
-}
+	// Usage records (sum by category + usage_unit)
+	usageRecords, err := tc.client.FetchUsageRecordsToday()
+	if err != nil {
+		logrus.WithError(err).Error("FetchUsageRecordsToday failed")
+		tc.apiErrorCounter.WithLabelValues("FetchUsageRecordsToday").Inc()
+	} else {
+		tc.usageGauge.Reset()
+		sums := make(map[string]float64) // key: category\xffusage_unit
+		for _, r := range usageRecords {
+			cat := ""
+			if r.Category != nil {
+				cat = *r.Category
+			}
+			unit := ""
+			if r.UsageUnit != nil {
+				unit = *r.UsageUnit
+			}
+			key := cat + "\xff" + unit
+			var v float64 = 0
+			if r.Usage != nil {
+				if parsed, err := strconv.ParseFloat(*r.Usage, 64); err == nil {
+					v = parsed
+				}
+			}
+			sums[key] += v
+		}
+		for k, v := range sums {
+			parts := strings.SplitN(k, "\xff", 2)
+			cat := ""
+			unit := ""
+			if len(parts) >= 1 {
+				cat = parts[0]
+			}
+			if len(parts) == 2 {
+				unit = parts[1]
+			}
+			tc.usageGauge.WithLabelValues(cat, unit).Set(v)
+		}
+	}
 
-type ApiV2010UsageRecordToday struct {
-	// The SID of the [Account](https://www.twilio.com/docs/iam/api/account) that accrued the usage.
-	AccountSid *string `json:"account_sid,omitempty"`
-	// The API version used to create the resource.
-	ApiVersion *string `json:"api_version,omitempty"`
-	// // Usage records up to date as of this timestamp, formatted as YYYY-MM-DDTHH:MM:SS+00:00. All timestamps are in GMT
-	// AsOf     *string `json:"as_of,omitempty"`
-	Category *string `json:"category,omitempty"`
-	// The number of usage events, such as the number of calls.
-	// Count *string `json:"count,omitempty"`
-	// // The units in which `count` is measured, such as `calls` for calls or `messages` for SMS.
-	CountUnit *string `json:"count_unit,omitempty"`
-	// // A plain-language description of the usage category.
-	// Description *string `json:"description,omitempty"`
-	// The last date for which usage is included in the UsageRecord. The date is specified in GMT and formatted as `YYYY-MM-DD`.
-	// EndDate *string `json:"end_date,omitempty"`
-	// // The total price of the usage in the currency specified in `price_unit` and associated with the account.
-	// Price *float32 `json:"price,omitempty"`
-	// The currency in which `price` is measured, in [ISO 4127](https://www.iso.org/iso/home/standards/currency_codes.htm) format, such as `usd`, `eur`, and `jpy`.
-	PriceUnit *string `json:"price_unit,omitempty"`
-	// // The first date for which usage is included in this UsageRecord. The date is specified in GMT and formatted as `YYYY-MM-DD`.
-	// StartDate *string `json:"start_date,omitempty"`
-	// // A list of related resources identified by their URIs. For more information, see [List Subresources](https://www.twilio.com/docs/usage/api/usage-record#list-subresources).
-	// SubresourceUris *map[string]interface{} `json:"subresource_uris,omitempty"`
-	// // The URI of the resource, relative to `https://api.twilio.com`.
-	// Uri *string `json:"uri,omitempty"`
-	// // The amount used to bill usage and measured in units described in `usage_unit`.
-	// Usage *string `json:"usage,omitempty"`
-	// // The units in which `usage` is measured, such as `minutes` for calls or `messages` for SMS.
-	// UsageUnit *string `json:"usage_unit,omitempty"`
-}
+	// Calls: count by status
+	calls, err := tc.client.FetchCalls()
+	if err != nil {
+		logrus.WithError(err).Error("FetchCalls failed")
+		tc.apiErrorCounter.WithLabelValues("FetchCalls").Inc()
+	} else {
+		tc.callsWindowGauge.Reset()
+		counts := make(map[string]int)
+		for _, c := range calls {
+			status := "unknown"
+			if c.Status != nil && *c.Status != "" {
+				status = *c.Status
+			}
+			counts[status]++
+		}
+		for status, cnt := range counts {
+			tc.callsWindowGauge.WithLabelValues(status).Set(float64(cnt))
+		}
+	}
 
-type ApiV2010Call struct {
-	// // The unique string that we created to identify this Call resource.
-	// Sid *string `json:"sid,omitempty"`
-	// // The date and time in UTC that this resource was created specified in [RFC 2822](https://www.ietf.org/rfc/rfc2822.txt) format.
-	// DateCreated *string `json:"date_created,omitempty"`
-	// // The date and time in UTC that this resource was last updated, specified in [RFC 2822](https://www.ietf.org/rfc/rfc2822.txt) format.
-	// DateUpdated *string `json:"date_updated,omitempty"`
-	// // The SID that identifies the call that created this leg.
-	// ParentCallSid *string `json:"parent_call_sid,omitempty"`
-	// // The SID of the [Account](https://www.twilio.com/docs/iam/api/account) that created this Call resource.
-	AccountSid *string `json:"account_sid,omitempty"`
-	// The phone number, SIP address, Client identifier or SIM SID that received this call. Phone numbers are in [E.164](https://www.twilio.com/docs/glossary/what-e164) format (e.g., +16175551212). SIP addresses are formatted as `name@company.com`. Client identifiers are formatted `client:name`. SIM SIDs are formatted as `sim:sid`.
-	To *string `json:"to,omitempty"`
-	// // The phone number, SIP address or Client identifier that received this call. Formatted for display. Non-North American phone numbers are in [E.164](https://www.twilio.com/docs/glossary/what-e164) format (e.g., +442071838750).
-	// ToFormatted *string `json:"to_formatted,omitempty"`
-	// // The phone number, SIP address, Client identifier or SIM SID that made this call. Phone numbers are in [E.164](https://www.twilio.com/docs/glossary/what-e164) format (e.g., +16175551212). SIP addresses are formatted as `name@company.com`. Client identifiers are formatted `client:name`. SIM SIDs are formatted as `sim:sid`.
-	From *string `json:"from,omitempty"`
-	// // The calling phone number, SIP address, or Client identifier formatted for display. Non-North American phone numbers are in [E.164](https://www.twilio.com/docs/glossary/what-e164) format (e.g., +442071838750).
-	// FromFormatted *string `json:"from_formatted,omitempty"`
-	// // If the call was inbound, this is the SID of the IncomingPhoneNumber resource that received the call. If the call was outbound, it is the SID of the OutgoingCallerId resource from which the call was placed.
-	// PhoneNumberSid *string `json:"phone_number_sid,omitempty"`
-	Status *string `json:"status,omitempty"`
-	// // The start time of the call, given as UTC in [RFC 2822](https://www.php.net/manual/en/class.datetime.php#datetime.constants.rfc2822) format. Empty if the call has not yet been dialed.
-	// StartTime *string `json:"start_time,omitempty"`
-	// // The time the call ended, given as UTC in [RFC 2822](https://www.php.net/manual/en/class.datetime.php#datetime.constants.rfc2822) format. Empty if the call did not complete successfully.
-	// EndTime *string `json:"end_time,omitempty"`
-	// // The length of the call in seconds. This value is empty for busy, failed, unanswered, or ongoing calls.
-	// Duration *string `json:"duration,omitempty"`
-	// // The charge for this call, in the currency associated with the account. Populated after the call is completed. May not be immediately available. The price associated with a call only reflects the charge for connectivity.  Charges for other call-related features such as Answering Machine Detection, Text-To-Speech, and SIP REFER are not included in this value.
-	// Price *string `json:"price,omitempty"`
-	// The currency in which `Price` is measured, in [ISO 4127](https://www.iso.org/iso/home/standards/currency_codes.htm) format (e.g., `USD`, `EUR`, `JPY`). Always capitalized for calls.
-	PriceUnit *string `json:"price_unit,omitempty"`
-	// // A string describing the direction of the call. Can be: `inbound` for inbound calls, `outbound-api` for calls initiated via the REST API or `outbound-dial` for calls initiated by a `<Dial>` verb. Using [Elastic SIP Trunking](https://www.twilio.com/docs/sip-trunking), the values can be [`trunking-terminating`](https://www.twilio.com/docs/sip-trunking#termination) for outgoing calls from your communications infrastructure to the PSTN or [`trunking-originating`](https://www.twilio.com/docs/sip-trunking#origination) for incoming calls to your communications infrastructure from the PSTN.
-	// Direction *string `json:"direction,omitempty"`
-	// // Either `human` or `machine` if this call was initiated with answering machine detection. Empty otherwise.
-	// AnsweredBy *string `json:"answered_by,omitempty"`
-	// The API version used to create the call.
-	ApiVersion *string `json:"api_version,omitempty"`
-	// // The forwarding phone number if this call was an incoming call forwarded from another number (depends on carrier supporting forwarding). Otherwise, empty.
-	// ForwardedFrom *string `json:"forwarded_from,omitempty"`
-	// // The Group SID associated with this call. If no Group is associated with the call, the field is empty.
-	// GroupSid *string `json:"group_sid,omitempty"`
-	// // The caller's name if this call was an incoming call to a phone number with caller ID Lookup enabled. Otherwise, empty.
-	// CallerName *string `json:"caller_name,omitempty"`
-	// // The wait time in milliseconds before the call is placed.
-	// QueueTime *string `json:"queue_time,omitempty"`
-	// // The unique identifier of the trunk resource that was used for this call. The field is empty if the call was not made using a SIP trunk or if the call is not terminated.
-	// TrunkSid *string `json:"trunk_sid,omitempty"`
-	// // The URI of this resource, relative to `https://api.twilio.com`.
-	// Uri *string `json:"uri,omitempty"`
-	// // A list of subresources available to this call, identified by their URIs relative to `https://api.twilio.com`.
-	// SubresourceUris *map[string]interface{} `json:"subresource_uris,omitempty"`
-}
+	// Messages: count by status, and failed by error code
+	messages, err := tc.client.FetchMessages()
+	if err != nil {
+		logrus.WithError(err).Error("FetchMessages failed")
+		tc.apiErrorCounter.WithLabelValues("FetchMessages").Inc()
+	} else {
+		tc.messagesWindowGauge.Reset()
+		tc.messagesFailedGauge.Reset()
+		statusCounts := make(map[string]int)
+		failedCounts := make(map[string]int)
+		for _, m := range messages {
+			status := "unknown"
+			if m.Status != nil && *m.Status != "" {
+				status = *m.Status
+			}
+			statusCounts[status]++
 
-type ApiV2010Message struct {
-	// // The text content of the message
-	// Body *string `json:"body,omitempty"`
-	// // The number of segments that make up the complete message. SMS message bodies that exceed the [character limit](https://www.twilio.com/docs/glossary/what-sms-character-limit) are segmented and charged as multiple messages. Note: For messages sent via a Messaging Service, `num_segments` is initially `0`, since a sender hasn't yet been assigned.
-	// NumSegments *string `json:"num_segments,omitempty"`
-	// Direction   *string `json:"direction,omitempty"`
-	// The sender's phone number (in [E.164](https://en.wikipedia.org/wiki/E.164) format), [alphanumeric sender ID](https://www.twilio.com/docs/sms/quickstart), [Wireless SIM](https://www.twilio.com/docs/iot/wireless/programmable-wireless-send-machine-machine-sms-commands), [short code](https://www.twilio.com/en-us/messaging/channels/sms/short-codes), or  [channel address](https://www.twilio.com/docs/messaging/channels) (e.g., `whatsapp:+15554449999`). For incoming messages, this is the number or channel address of the sender. For outgoing messages, this value is a Twilio phone number, alphanumeric sender ID, short code, or channel address from which the message is sent.
-	From *string `json:"from,omitempty"`
-	// The recipient's phone number (in [E.164](https://en.wikipedia.org/wiki/E.164) format) or [channel address](https://www.twilio.com/docs/messaging/channels) (e.g. `whatsapp:+15552229999`)
-	To *string `json:"to,omitempty"`
-	// // The [RFC 2822](https://datatracker.ietf.org/doc/html/rfc2822#section-3.3) timestamp (in GMT) of when the Message resource was last updated
-	// DateUpdated *string `json:"date_updated,omitempty"`
-	// // The amount billed for the message in the currency specified by `price_unit`. The `price` is populated after the message has been sent/received, and may not be immediately availalble. View the [Pricing page](https://www.twilio.com/en-us/pricing) for more details.
-	// Price *string `json:"price,omitempty"`
-	// // The description of the `error_code` if the Message `status` is `failed` or `undelivered`. If no error was encountered, the value is `null`. The value returned in this field for a specific error cause is subject to change as Twilio improves errors. Users should not use the `error_code` and `error_message` fields programmatically.
-	// ErrorMessage *string `json:"error_message,omitempty"`
-	// // The URI of the Message resource, relative to `https://api.twilio.com`.
-	// Uri *string `json:"uri,omitempty"`
-	// The SID of the [Account](https://www.twilio.com/docs/iam/api/account) associated with the Message resource
-	AccountSid *string `json:"account_sid,omitempty"`
-	// // The number of media files associated with the Message resource.
-	// NumMedia *string `json:"num_media,omitempty"`
-	// Status   *string `json:"status,omitempty"`
-	// // The SID of the [Messaging Service](https://www.twilio.com/docs/messaging/api/service-resource) associated with the Message resource. A unique default value is assigned if a Messaging Service is not used.
-	// MessagingServiceSid *string `json:"messaging_service_sid,omitempty"`
-	// // The unique, Twilio-provided string that identifies the Message resource.
-	// Sid *string `json:"sid,omitempty"`
-	// // The [RFC 2822](https://datatracker.ietf.org/doc/html/rfc2822#section-3.3) timestamp (in GMT) of when the Message was sent. For an outgoing message, this is when Twilio sent the message. For an incoming message, this is when Twilio sent the HTTP request to your incoming message webhook URL.
-	// DateSent *string `json:"date_sent,omitempty"`
-	// // The [RFC 2822](https://datatracker.ietf.org/doc/html/rfc2822#section-3.3) timestamp (in GMT) of when the Message resource was created
-	// DateCreated *string `json:"date_created,omitempty"`
-	// The [error code](https://www.twilio.com/docs/api/errors) returned if the Message `status` is `failed` or `undelivered`. If no error was encountered, the value is `null`. The value returned in this field for a specific error cause is subject to change as Twilio improves errors. Users should not use the `error_code` and `error_message` fields programmatically.
-	ErrorCode *int `json:"error_code,omitempty"`
-	// The currency in which `price` is measured, in [ISO 4127](https://www.iso.org/iso/home/standards/currency_codes.htm) format (e.g. `usd`, `eur`, `jpy`).
-	PriceUnit *string `json:"price_unit,omitempty"`
-	// The API version used to process the Message
-	ApiVersion *string `json:"api_version,omitempty"`
-	// // A list of related resources identified by their URIs relative to `https://api.twilio.com`
-	// SubresourceUris *map[string]interface{} `json:"subresource_uris,omitempty"`
+			if m.ErrorCode != nil {
+				code := strconv.Itoa(*m.ErrorCode)
+				failedCounts[code]++
+			}
+		}
+		for s, cnt := range statusCounts {
+			tc.messagesWindowGauge.WithLabelValues(s).Set(float64(cnt))
+		}
+		for code, cnt := range failedCounts {
+			tc.messagesFailedGauge.WithLabelValues(code).Set(float64(cnt))
+		}
+	}
+
+	// Collect all metrics onto the channel
+	tc.balanceGauge.Collect(ch)
+	tc.usageGauge.Collect(ch)
+	tc.callsWindowGauge.Collect(ch)
+	tc.messagesWindowGauge.Collect(ch)
+	tc.messagesFailedGauge.Collect(ch)
+	tc.apiErrorCounter.Collect(ch)
 }
